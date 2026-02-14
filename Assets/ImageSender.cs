@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using Siccity.GLTFUtility;
 using UnityEngine;
 using UnityEngine.Networking;
@@ -27,6 +28,11 @@ public class ImageSender : MonoBehaviour
     [SerializeField] private bool saveReceivedGlbToDisk = false;
 
     private bool missingFaceDataWarningShown = false;
+    private Coroutine sendLoopCoroutine;
+    private UnityWebRequest activeRequest;
+    private bool isShuttingDown = false;
+    private static bool loggedFallbackShader = false;
+    private bool isInitialized = false;
 
     private void Start()
     {
@@ -49,14 +55,45 @@ public class ImageSender : MonoBehaviour
         }
 #endif
 
-        StartCoroutine(SendImageCoroutine());
+        isShuttingDown = false;
+        if (sendLoopCoroutine == null)
+        {
+            sendLoopCoroutine = StartCoroutine(SendImageCoroutine());
+        }
+        isInitialized = true;
+    }
+
+    private void OnEnable()
+    {
+        if (!isInitialized) return;
+        if (rawImage == null)
+        {
+            rawImage = GetComponent<RawImage>();
+        }
+        if (rawImage == null) return;
+
+        isShuttingDown = false;
+        if (sendLoopCoroutine == null)
+        {
+            sendLoopCoroutine = StartCoroutine(SendImageCoroutine());
+        }
+    }
+
+    private void OnDisable()
+    {
+        Shutdown();
+    }
+
+    private void OnDestroy()
+    {
+        Shutdown();
     }
 
     private IEnumerator SendImageCoroutine()
     {
         yield return new WaitForSeconds(1.0f);
 
-        while (true)
+        while (!isShuttingDown && isActiveAndEnabled)
         {
             Texture screenTexture = rawImage.texture;
             if (screenTexture == null)
@@ -67,9 +104,18 @@ public class ImageSender : MonoBehaviour
             }
 
             byte[] imageData = ConvertTextureToJpg(screenTexture);
+            if (imageData == null || imageData.Length == 0)
+            {
+                Debug.LogWarning("[ImageSender] Failed to encode texture to JPG.");
+                yield return new WaitForSeconds(interval);
+                continue;
+            }
+
             yield return StartCoroutine(UploadImage(imageData));
             yield return new WaitForSeconds(interval);
         }
+
+        sendLoopCoroutine = null;
     }
 
     private byte[] ConvertTextureToJpg(Texture texture)
@@ -97,6 +143,17 @@ public class ImageSender : MonoBehaviour
 
     private IEnumerator UploadImage(byte[] imageData)
     {
+        if (isShuttingDown)
+        {
+            yield break;
+        }
+
+        if (imageData == null || imageData.Length == 0)
+        {
+            Debug.LogError("[ImageSender] Upload skipped: image data is empty.");
+            yield break;
+        }
+
         string endpoint = ServerEndpointSettings.BuildUrl(classificationPath);
 
         int attempts = Mathf.Max(1, maxUploadAttempts);
@@ -109,9 +166,16 @@ public class ImageSender : MonoBehaviour
             {
                 www.useHttpContinue = false;
                 www.timeout = timeoutSeconds;
+                activeRequest = www;
 
                 Debug.Log("[ImageSender] POST " + endpoint + $" (attempt {attempt}/{attempts})");
                 yield return www.SendWebRequest();
+                activeRequest = null;
+
+                if (isShuttingDown)
+                {
+                    yield break;
+                }
 
                 if (www.result != UnityWebRequest.Result.Success)
                 {
@@ -140,17 +204,34 @@ public class ImageSender : MonoBehaviour
                 if (!isGlbResponse)
                 {
                     string body = www.downloadHandler?.text ?? string.Empty;
-                    if (body.Length > 300) body = body.Substring(0, 300);
-                    Debug.LogWarning("[ImageSender] Response is not GLB. Body preview: " + body);
+                    string bodyPreview = body.Length > 300 ? body.Substring(0, 300) : body;
+                    Debug.LogWarning("[ImageSender] Response is not GLB. Body preview: " + bodyPreview);
 
-                    if (!missingFaceDataWarningShown &&
-                        body.IndexOf("No registered face data available", StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (TryExtractGlbUrl(body, endpoint, out string glbUrl))
                     {
-                        missingFaceDataWarningShown = true;
-                        Debug.LogError("[ImageSender] Face data is not registered on server. Register face data first.");
-                    }
+                        Debug.Log("[ImageSender] GLB URL found in JSON response: " + glbUrl);
 
-                    yield break;
+                        byte[] downloadedGlb = null;
+                        yield return StartCoroutine(DownloadGlb(glbUrl, bytes => downloadedGlb = bytes));
+                        if (downloadedGlb == null || downloadedGlb.Length == 0)
+                        {
+                            Debug.LogError("[ImageSender] Downloaded GLB is empty.");
+                            yield break;
+                        }
+
+                        responseData = downloadedGlb;
+                    }
+                    else
+                    {
+                        if (!missingFaceDataWarningShown &&
+                            body.IndexOf("No registered face data available", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            missingFaceDataWarningShown = true;
+                            Debug.LogError("[ImageSender] Face data is not registered on server. Register face data first.");
+                        }
+
+                        yield break;
+                    }
                 }
 
                 if (responseData == null || responseData.Length == 0)
@@ -209,6 +290,48 @@ public class ImageSender : MonoBehaviour
         }
     }
 
+    private IEnumerator DownloadGlb(string glbUrl, Action<byte[]> onCompleted)
+    {
+        if (string.IsNullOrEmpty(glbUrl))
+        {
+            onCompleted?.Invoke(null);
+            yield break;
+        }
+
+        using (UnityWebRequest req = UnityWebRequest.Get(glbUrl))
+        {
+            req.useHttpContinue = false;
+            req.timeout = timeoutSeconds;
+            activeRequest = req;
+
+            yield return req.SendWebRequest();
+            activeRequest = null;
+
+            if (isShuttingDown)
+            {
+                onCompleted?.Invoke(null);
+                yield break;
+            }
+
+            if (req.result != UnityWebRequest.Result.Success)
+            {
+                Debug.LogError("[ImageSender] GLB download failed: " + req.error + " | HTTP " + req.responseCode);
+                onCompleted?.Invoke(null);
+                yield break;
+            }
+
+            byte[] data = req.downloadHandler?.data;
+            if (!LooksLikeGlb(data))
+            {
+                Debug.LogError("[ImageSender] Downloaded payload is not GLB.");
+                onCompleted?.Invoke(null);
+                yield break;
+            }
+
+            onCompleted?.Invoke(data);
+        }
+    }
+
     private void PrepareImportedModel(GameObject importedModel)
     {
         if (importedModel == null) return;
@@ -249,6 +372,43 @@ public class ImageSender : MonoBehaviour
                bytes[3] == 0x46;
     }
 
+    private static bool TryExtractGlbUrl(string body, string endpoint, out string glbUrl)
+    {
+        glbUrl = null;
+        if (string.IsNullOrWhiteSpace(body)) return false;
+
+        Match match = Regex.Match(
+            body,
+            "\"(?:glb_url|glbUrl|model_url|modelUrl|download_url|downloadUrl|file_url|fileUrl|url|path)\"\\s*:\\s*\"(?<url>[^\"]+)\"",
+            RegexOptions.IgnoreCase);
+
+        if (!match.Success) return false;
+
+        string rawUrl = match.Groups["url"].Value.Trim();
+        if (string.IsNullOrEmpty(rawUrl)) return false;
+        rawUrl = Regex.Unescape(rawUrl);
+        if (rawUrl.IndexOf(".glb", StringComparison.OrdinalIgnoreCase) < 0) return false;
+
+        if (Uri.TryCreate(rawUrl, UriKind.Absolute, out Uri absoluteUri))
+        {
+            glbUrl = absoluteUri.ToString();
+            return true;
+        }
+
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out Uri endpointUri))
+        {
+            return false;
+        }
+
+        if (!Uri.TryCreate(endpointUri, rawUrl, out Uri resolvedUri))
+        {
+            return false;
+        }
+
+        glbUrl = resolvedUri.ToString();
+        return true;
+    }
+
     private static ImportSettings BuildImportSettings()
     {
         var settings = new ImportSettings();
@@ -284,7 +444,21 @@ public class ImageSender : MonoBehaviour
     private static void AssignShaderOverride(ShaderSettings shaderSettings, string fieldName, params string[] candidates)
     {
         Shader shader = FindFirstShader(candidates);
-        if (shader == null) return;
+        if (shader == null)
+        {
+            shader = FindGuaranteedShader();
+            if (shader == null)
+            {
+                Debug.LogWarning("[ImageSender] No usable fallback shader for field: " + fieldName);
+                return;
+            }
+
+            if (!loggedFallbackShader)
+            {
+                loggedFallbackShader = true;
+                Debug.LogWarning("[ImageSender] GLTFUtility shader missing. Falling back to: " + shader.name);
+            }
+        }
 
         FieldInfo field = typeof(ShaderSettings).GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
         if (field != null)
@@ -301,6 +475,41 @@ public class ImageSender : MonoBehaviour
             if (s != null) return s;
         }
         return null;
+    }
+
+    private static Shader FindGuaranteedShader()
+    {
+        return FindFirstShader(
+            "Universal Render Pipeline/Lit",
+            "Standard",
+            "Unlit/Texture",
+            "Sprites/Default",
+            "UI/Default",
+            "Hidden/InternalErrorShader");
+    }
+
+    private void Shutdown()
+    {
+        isShuttingDown = true;
+
+        if (sendLoopCoroutine != null)
+        {
+            StopCoroutine(sendLoopCoroutine);
+            sendLoopCoroutine = null;
+        }
+
+        if (activeRequest != null)
+        {
+            try
+            {
+                activeRequest.Abort();
+            }
+            catch
+            {
+                // Ignore abort errors during teardown.
+            }
+            activeRequest = null;
+        }
     }
 
     private static void LogShaderAvailability()

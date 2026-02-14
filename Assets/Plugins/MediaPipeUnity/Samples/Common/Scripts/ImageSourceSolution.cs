@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+using System;
 using System.Collections;
 using UnityEngine;
 
@@ -50,9 +51,45 @@ namespace Mediapipe.Unity
     public override void Stop()
     {
       base.Stop();
-      StopCoroutine(_coroutine);
-      ImageSourceProvider.ImageSource.Stop();
-      graphRunner.Stop();
+
+      if (_coroutine != null)
+      {
+        StopCoroutine(_coroutine);
+        _coroutine = null;
+      }
+
+      var imageSource = ImageSourceProvider.ImageSource;
+      if (imageSource != null)
+      {
+        imageSource.Stop();
+      }
+
+      if (graphRunner != null)
+      {
+        graphRunner.Stop();
+      }
+    }
+
+    protected virtual void OnDisable()
+    {
+      SafeStopForTeardown();
+    }
+
+    protected virtual void OnDestroy()
+    {
+      SafeStopForTeardown();
+    }
+
+    private void SafeStopForTeardown()
+    {
+      try
+      {
+        Stop();
+      }
+      catch (Exception e)
+      {
+        Logger.LogWarning(TAG, $"Stop during teardown failed: {e.Message}");
+      }
     }
 
     private IEnumerator Run()

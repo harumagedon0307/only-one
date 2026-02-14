@@ -1,15 +1,23 @@
-using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
 public class ButtonScript : MonoBehaviour
 {
-    //ƒ{ƒ^ƒ“‚ª‰Ÿ‚³‚ê‚½‚Ìˆ—
+    private const string TargetScenePath = "Assets/Scenes/wear_to_3d.unity";
+    private bool isLoading = false;
+
+    // Called from UI button OnClick
     public void OnClick()
     {
-        //Debug.Log("‚¢‚Ü‚¢‚é");
-        SceneManager.LoadScene("wear_to_3d");
+        if (isLoading) return;
+
+        if (!Application.CanStreamedLevelBeLoaded(TargetScenePath))
+        {
+            Debug.LogError($"Scene '{TargetScenePath}' is not enabled in Build Settings.");
+            return;
+        }
+
+        isLoading = true;
+        SceneManager.LoadScene(TargetScenePath);
     }
-    
 }
