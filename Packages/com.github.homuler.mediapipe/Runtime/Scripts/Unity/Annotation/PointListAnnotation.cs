@@ -52,10 +52,14 @@ namespace Mediapipe.Unity
         [SerializeField] private float _modelRotationOffset = 180.0f;
         [SerializeField] private bool _mirrorMode = true;
         [SerializeField] private bool _useDynamicRotation = false;
+        [SerializeField] private bool _forceVisibleInFrontOfCamera = true;
+        [SerializeField] private float _fallbackDepthMeters = 2.5f;
+        [SerializeField] private float _minimumModelScale = 0.6f;
 
         [Header("Visibility Stability")]
         [SerializeField] private int _visibilityBufferFrames = 10; // Number of frames to wait before hiding model
         private int _visibilityCounter = 0;
+        private bool _loggedVisibilityFallback = false;
 
         private Vector3 _lastForward = Vector3.forward;
         private bool _isScaled = false;
@@ -398,6 +402,7 @@ namespace Mediapipe.Unity
 
             Vector3 shoulderCenter = (leftShoulder + rightShoulder) * 0.5f;
             Vector3 hipCenter = (leftHip + rightHip) * 0.5f;
+            Vector3 bottomCenter = (children[23].transform.position + children[24].transform.position) * 0.5f;
 
             float yaw = 0f;
             if (_useDynamicRotation)
@@ -405,10 +410,14 @@ namespace Mediapipe.Unity
                 Vector3 bodyUp = (shoulderCenter - hipCenter).normalized;
                 Vector3 bodyRight = (rightShoulder - leftShoulder).normalized;
                 Vector3 bodyForward = Vector3.Cross(bodyRight, bodyUp).normalized;
-                Vector3 camUp = Camera.main.transform.up;
-                Vector3 camForward = Camera.main.transform.forward;
-                Vector3 projectedForward = Vector3.ProjectOnPlane(bodyForward, camUp).normalized;
-                yaw = Vector3.SignedAngle(camForward, projectedForward, camUp);
+                Camera cam = Camera.main;
+                if (cam != null)
+                {
+                    Vector3 camUp = cam.transform.up;
+                    Vector3 camForward = cam.transform.forward;
+                    Vector3 projectedForward = Vector3.ProjectOnPlane(bodyForward, camUp).normalized;
+                    yaw = Vector3.SignedAngle(camForward, projectedForward, camUp);
+                }
             }
 
             Quaternion targetRot = Quaternion.Euler(0f, yaw + _modelRotationOffset, 0f);
@@ -424,9 +433,70 @@ namespace Mediapipe.Unity
                 }
             }
 
+            if (_forceVisibleInFrontOfCamera)
+            {
+                hipCenter = EnsurePointInFrontOfCamera(hipCenter);
+                bottomCenter = EnsurePointInFrontOfCamera(bottomCenter);
+            }
+
             _targetObject.transform.position = hipCenter;
-            Vector3 bottomCenter = (children[23].transform.position + children[24].transform.position) * 0.5f;
             AlignModelToBottomCenter(_targetObject, bottomCenter);
+            EnsureMinimumScale(_targetObject);
+        }
+
+        private Vector3 EnsurePointInFrontOfCamera(Vector3 point)
+        {
+            Camera cam = Camera.main;
+            if (cam == null) return point;
+
+            if (!IsFinite(point))
+            {
+                return cam.transform.position + cam.transform.forward * Mathf.Max(_fallbackDepthMeters, cam.nearClipPlane + 0.3f);
+            }
+
+            Vector3 view = cam.WorldToViewportPoint(point);
+            bool invalid = !IsFinite(view);
+            bool behind = view.z <= cam.nearClipPlane + 0.05f;
+            bool extreme = view.z > 1000f;
+            if (!invalid && !behind && !extreme)
+            {
+                return point;
+            }
+
+            float x = invalid ? 0.5f : Mathf.Clamp01(view.x);
+            float y = invalid ? 0.5f : Mathf.Clamp01(view.y);
+            float depth = Mathf.Max(_fallbackDepthMeters, cam.nearClipPlane + 0.3f);
+            Vector3 fallback = cam.ViewportToWorldPoint(new Vector3(x, y, depth));
+
+            if (!_loggedVisibilityFallback)
+            {
+                _loggedVisibilityFallback = true;
+                Debug.LogWarning("[PointListAnnotation] Model anchor was behind/invalid. Applying camera-front fallback.");
+            }
+
+            return fallback;
+        }
+
+        private void EnsureMinimumScale(GameObject model)
+        {
+            if (model == null) return;
+
+            float minScale = Mathf.Max(0.01f, _minimumModelScale);
+            Vector3 s = model.transform.localScale;
+            float uniform = Mathf.Max(s.x, Mathf.Max(s.y, s.z));
+            if (uniform >= minScale) return;
+
+            model.transform.localScale = Vector3.one * minScale;
+        }
+
+        private static bool IsFinite(Vector3 v)
+        {
+            return IsFinite(v.x) && IsFinite(v.y) && IsFinite(v.z);
+        }
+
+        private static bool IsFinite(float f)
+        {
+            return !float.IsNaN(f) && !float.IsInfinity(f);
         }
 
         private void WearSegment(Vector3 highJointMP, Vector3 lowJointMP, List<Transform> boneTransforms)

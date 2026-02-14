@@ -336,6 +336,9 @@ public class ImageSender : MonoBehaviour
     {
         if (importedModel == null) return;
 
+        // Normalize transparency/culling so Android shaders do not hide the whole model.
+        URPMaterialHelper.EnsureVisible(importedModel, forceDoubleSided);
+
         if (convertImportedMaterialsToUrp)
         {
             URPMaterialHelper.ConvertToURPMaterials(importedModel, forceDoubleSided);
