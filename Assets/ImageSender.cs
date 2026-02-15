@@ -17,7 +17,7 @@ public class ImageSender : MonoBehaviour
     [Header("FastAPI")]
     [SerializeField] private string classificationPath = "/face/classification_face";
     [SerializeField] private int timeoutSeconds = 20;
-    [SerializeField] private int maxUploadAttempts = 2;
+    [SerializeField] private int maxUploadAttempts = 3;
 
     [Header("Loop")]
     [SerializeField] public float interval = 5.0f;
@@ -25,6 +25,8 @@ public class ImageSender : MonoBehaviour
     [Header("Imported Material")]
     [SerializeField] private bool convertImportedMaterialsToUrp = false;
     [SerializeField] private bool forceDoubleSided = true;
+    [SerializeField] private bool forceUnlitForVisibility = false;
+    [SerializeField] private bool forceSolidColorForVisibility = false;
     [SerializeField] private bool saveReceivedGlbToDisk = false;
 
     private bool missingFaceDataWarningShown = false;
@@ -33,6 +35,7 @@ public class ImageSender : MonoBehaviour
     private bool isShuttingDown = false;
     private static bool loggedFallbackShader = false;
     private bool isInitialized = false;
+    private string lastAppliedGlbFingerprint = string.Empty;
 
     private void Start()
     {
@@ -45,6 +48,11 @@ public class ImageSender : MonoBehaviour
 
         Debug.Log("[ImageSender] Importer assembly: " + typeof(Importer).Assembly.FullName);
         LogShaderAvailability();
+        Debug.Log(
+            "[ImageSender] Material flags: " +
+            $"preferUnlit={forceUnlitForVisibility}, " +
+            $"forceSolidColor={forceSolidColorForVisibility}, " +
+            $"forceDoubleSided={forceDoubleSided}");
 
         string baseUrl = ServerEndpointSettings.GetBaseUrl();
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -156,7 +164,7 @@ public class ImageSender : MonoBehaviour
 
         string endpoint = ServerEndpointSettings.BuildUrl(classificationPath);
 
-        int attempts = Mathf.Max(1, maxUploadAttempts);
+        int attempts = Mathf.Max(3, maxUploadAttempts);
         for (int attempt = 1; attempt <= attempts; attempt++)
         {
             WWWForm form = new WWWForm();
@@ -166,6 +174,8 @@ public class ImageSender : MonoBehaviour
             {
                 www.useHttpContinue = false;
                 www.timeout = timeoutSeconds;
+                www.SetRequestHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+                www.SetRequestHeader("Pragma", "no-cache");
                 activeRequest = www;
 
                 Debug.Log("[ImageSender] POST " + endpoint + $" (attempt {attempt}/{attempts})");
@@ -180,11 +190,13 @@ public class ImageSender : MonoBehaviour
                 if (www.result != UnityWebRequest.Result.Success)
                 {
                     string err = www.error ?? string.Empty;
-                    bool curl65 = err.IndexOf("Curl error 65", StringComparison.OrdinalIgnoreCase) >= 0;
-                    if (curl65 && attempt < attempts)
+                    bool retryable = IsRetryableUploadError(www, err);
+                    if (retryable && attempt < attempts)
                     {
-                        Debug.LogWarning("[ImageSender] Curl error 65 detected. Retrying request once.");
-                        yield return null;
+                        Debug.LogWarning(
+                            "[ImageSender] Upload transient error. Retrying... " +
+                            $"(attempt {attempt + 1}/{attempts}) err='{err}' http={www.responseCode}");
+                        yield return new WaitForSeconds(0.2f);
                         continue;
                     }
 
@@ -240,6 +252,14 @@ public class ImageSender : MonoBehaviour
                     yield break;
                 }
 
+                string responseFingerprint = ComputeBinaryFingerprint(responseData);
+                Debug.Log("[ImageSender] GLB fingerprint: " + responseFingerprint);
+                if (!string.IsNullOrEmpty(lastAppliedGlbFingerprint) &&
+                    string.Equals(lastAppliedGlbFingerprint, responseFingerprint, StringComparison.Ordinal))
+                {
+                    Debug.LogWarning("[ImageSender] GLB fingerprint is unchanged from previous apply. Server may be returning the same model.");
+                }
+
                 if (saveReceivedGlbToDisk)
                 {
                     try
@@ -259,8 +279,7 @@ public class ImageSender : MonoBehaviour
                 GameObject importedModel = null;
                 try
                 {
-                    ImportSettings importSettings = BuildImportSettings();
-                    importedModel = Importer.LoadFromBytes(responseData, importSettings);
+                    importedModel = GltfImportRuntimeHelper.LoadFromBytesSafe(responseData);
                 }
                 catch (Exception e)
                 {
@@ -284,6 +303,7 @@ public class ImageSender : MonoBehaviour
                 }
 
                 replacer.ReplaceModel(importedModel);
+                lastAppliedGlbFingerprint = responseFingerprint;
                 Debug.Log("[ImageSender] Server model applied.");
                 yield break;
             }
@@ -298,12 +318,16 @@ public class ImageSender : MonoBehaviour
             yield break;
         }
 
-        using (UnityWebRequest req = UnityWebRequest.Get(glbUrl))
+        string requestUrl = AppendCacheBust(glbUrl);
+        using (UnityWebRequest req = UnityWebRequest.Get(requestUrl))
         {
             req.useHttpContinue = false;
             req.timeout = timeoutSeconds;
+            req.SetRequestHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+            req.SetRequestHeader("Pragma", "no-cache");
             activeRequest = req;
 
+            Debug.Log("[ImageSender] GET " + requestUrl);
             yield return req.SendWebRequest();
             activeRequest = null;
 
@@ -332,16 +356,55 @@ public class ImageSender : MonoBehaviour
         }
     }
 
+    private static string AppendCacheBust(string url)
+    {
+        if (string.IsNullOrEmpty(url)) return url;
+
+        string separator = url.IndexOf('?') >= 0 ? "&" : "?";
+        return url + separator + "cb=" + DateTime.UtcNow.Ticks.ToString();
+    }
+
+    private static string ComputeBinaryFingerprint(byte[] data)
+    {
+        if (data == null || data.Length == 0) return "empty";
+
+        unchecked
+        {
+            const uint fnvPrime = 16777619u;
+            uint hash = 2166136261u;
+            int step = data.Length > 4096 ? data.Length / 4096 : 1;
+
+            for (int i = 0; i < data.Length; i += step)
+            {
+                hash ^= data[i];
+                hash *= fnvPrime;
+            }
+
+            hash ^= (uint)data.Length;
+            hash *= fnvPrime;
+
+            return data.Length.ToString() + "B-" + hash.ToString("X8");
+        }
+    }
+
     private void PrepareImportedModel(GameObject importedModel)
     {
         if (importedModel == null) return;
 
         // Normalize transparency/culling so Android shaders do not hide the whole model.
-        URPMaterialHelper.EnsureVisible(importedModel, forceDoubleSided);
+        URPMaterialHelper.EnsureVisible(
+            importedModel,
+            forceDoubleSided,
+            forceUnlitForVisibility,
+            forceSolidColorForVisibility);
 
         if (convertImportedMaterialsToUrp)
         {
-            URPMaterialHelper.ConvertToURPMaterials(importedModel, forceDoubleSided);
+            URPMaterialHelper.ConvertToURPMaterials(
+                importedModel,
+                forceDoubleSided,
+                forceUnlitForVisibility,
+                forceSolidColorForVisibility);
             return;
         }
 
@@ -513,6 +576,28 @@ public class ImageSender : MonoBehaviour
             }
             activeRequest = null;
         }
+    }
+
+    private static bool IsRetryableUploadError(UnityWebRequest www, string error)
+    {
+        string err = (error ?? string.Empty).Trim();
+        long code = www != null ? www.responseCode : 0;
+
+        if (err.IndexOf("Curl error 65", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            return true;
+        }
+
+        if (code == 0)
+        {
+            if (string.IsNullOrEmpty(err)) return true;
+            if (err.IndexOf("Unknown Error", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (err.IndexOf("timeout", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (err.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (err.IndexOf("connection", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        }
+
+        return false;
     }
 
     private static void LogShaderAvailability()

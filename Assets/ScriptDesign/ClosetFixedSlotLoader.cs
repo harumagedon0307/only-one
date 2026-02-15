@@ -88,7 +88,7 @@ public class ClosetFixedSlotLoader : MonoBehaviour
 #if UNITY_EDITOR
         if (!File.Exists(glbFullPath)) glbFullPath = Path.Combine(Application.streamingAssetsPath, muscleGlbPath);
 #endif
-        GameObject model = Importer.LoadFromFile(glbFullPath);
+        GameObject model = GltfImportRuntimeHelper.LoadFromFileSafe(glbFullPath);
         ApplyTexturesToMuscle(model, frontTex, backTex);
 
         var exporter = gameObject.AddComponent<GlbExporter>();

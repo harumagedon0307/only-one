@@ -132,7 +132,7 @@ public class ClosetItemManager : MonoBehaviour
 #if UNITY_EDITOR
         if (!File.Exists(glbFullPath)) glbFullPath = Path.Combine(Application.streamingAssetsPath, muscleGlbPath);
 #endif
-        GameObject muscleModel = Importer.LoadFromFile(glbFullPath);
+        GameObject muscleModel = GltfImportRuntimeHelper.LoadFromFileSafe(glbFullPath);
         if (muscleModel == null) yield break;
 
         ApplyTexturesToMuscle(muscleModel, frontTex, backTex);

@@ -18,6 +18,16 @@ namespace Mediapipe.Unity
 
     private Coroutine _coroutine;
 
+    protected virtual void OnEnable()
+    {
+      // If this component is re-enabled after a temporary disable, restart the pipeline.
+      if (_coroutine == null && bootstrap != null && bootstrap.isFinished)
+      {
+        Logger.LogInfo(TAG, "OnEnable: restarting Play()");
+        Play();
+      }
+    }
+
     public RunningMode runningMode;
 
     public long timeoutMillisec
@@ -39,13 +49,21 @@ namespace Mediapipe.Unity
     public override void Pause()
     {
       base.Pause();
-      ImageSourceProvider.ImageSource.Pause();
+      var imageSource = ImageSourceProvider.ImageSource;
+      if (imageSource != null)
+      {
+        imageSource.Pause();
+      }
     }
 
     public override void Resume()
     {
       base.Resume();
-      var _ = StartCoroutine(ImageSourceProvider.ImageSource.Resume());
+      var imageSource = ImageSourceProvider.ImageSource;
+      if (imageSource != null)
+      {
+        var _ = StartCoroutine(imageSource.Resume());
+      }
     }
 
     public override void Stop()
@@ -75,6 +93,20 @@ namespace Mediapipe.Unity
       SafeStopForTeardown();
     }
 
+    protected virtual void OnApplicationPause(bool pauseStatus)
+    {
+      Logger.LogInfo(TAG, $"OnApplicationPause({pauseStatus})");
+      if (pauseStatus)
+      {
+        // Pause only; full Stop here can break resume on some Android devices.
+        Pause();
+      }
+      else
+      {
+        Resume();
+      }
+    }
+
     protected virtual void OnDestroy()
     {
       SafeStopForTeardown();
@@ -90,6 +122,7 @@ namespace Mediapipe.Unity
       {
         Logger.LogWarning(TAG, $"Stop during teardown failed: {e.Message}");
       }
+
     }
 
     private IEnumerator Run()
