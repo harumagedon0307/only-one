@@ -1,4 +1,4 @@
-﻿using UnityEngine;
+using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
@@ -73,15 +73,16 @@ public class Editable : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, I
     {
         if (isEditing && currentEditingTarget == this && Input.touchCount <= 1)
         {
-            rectTransform.anchoredPosition += eventData.delta / canvas.scaleFactor;
+            if (rectTransform == null) return;
+            float scale = (canvas != null && canvas.scaleFactor > 0f) ? canvas.scaleFactor : 1f;
+            rectTransform.anchoredPosition += eventData.delta / scale;
         }
     }
 
     void LongPressSuccess()
     {
         isPointerDown = false;
-
-        CreateInputBlocker();  // 後ろの UI を完全遮断
+        ActivateEditingTarget();
         OpenEditMenu();
     }
 
@@ -94,20 +95,38 @@ public class Editable : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, I
     void OpenEditMenu()
     {
         if (currentMenu != null) return;
+        if (editMenuPrefab == null)
+        {
+            Debug.LogWarning("Editable: editMenuPrefab is missing. Drag-only edit mode is enabled.");
+            return;
+        }
 
+        CreateInputBlocker();  // 後ろの UI を完全遮断
+
+        currentMenu = Instantiate(editMenuPrefab, transform.parent);
+        currentMenu.transform.position = transform.position;
+
+        EditMenu menu = currentMenu.GetComponent<EditMenu>();
+        if (menu != null)
+        {
+            menu.SetTarget(this.gameObject);
+        }
+        else
+        {
+            Debug.LogWarning("Editable: EditMenu component is missing on editMenuPrefab.");
+        }
+    }
+
+    void ActivateEditingTarget()
+    {
         // 他が編集中なら解除（1つだけ編集）
         if (currentEditingTarget != null && currentEditingTarget != this)
         {
             currentEditingTarget.CloseEditMenuFromScript();
         }
 
-        currentMenu = Instantiate(editMenuPrefab, transform.parent);
-        currentMenu.transform.position = transform.position;
-
         isEditing = true;
         currentEditingTarget = this;
-
-        currentMenu.GetComponent<EditMenu>().SetTarget(this.gameObject);
     }
 
     // ---------- ピンチ拡大縮小 ----------
@@ -149,6 +168,11 @@ public class Editable : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, I
     void CreateInputBlocker()
     {
         if (inputBlocker != null) return;
+        if (canvas == null)
+        {
+            Debug.LogWarning("Editable: Canvas was not found. Input blocker is skipped.");
+            return;
+        }
 
         inputBlocker = new GameObject("InputBlocker");
         var img = inputBlocker.AddComponent<Image>();

@@ -8,18 +8,26 @@ public class SquareSpawner : MonoBehaviour
 
     public void Squarespawner()
     {
+        if (squarePrefab == null || LayerManager.Instance == null)
+        {
+            Debug.LogWarning("SquareSpawner: squarePrefab or LayerManager is missing.");
+            return;
+        }
+
         GameObject newSquare = Instantiate(squarePrefab, LayerManager.Instance.GetCurrentLayer());
 
         RectTransform rect = newSquare.GetComponent<RectTransform>();
-        rect.anchoredPosition = Vector2.zero;
+        if (rect != null)
+        {
+            rect.anchoredPosition = Vector2.zero;
+            rect.sizeDelta = new Vector2(100f, 100f);
+        }
 
-        // rect.localScale = new Vector3(0.25f, 0.25f, 1f); ←削除
-        rect.sizeDelta = new Vector2(100f, 100f); // 好きな初期サイズ
-
-        Editable editable = newSquare.AddComponent<Editable>();
+        Editable editable = newSquare.GetComponent<Editable>();
+        if (editable == null)
+        {
+            editable = newSquare.AddComponent<Editable>();
+        }
         editable.editMenuPrefab = editMenuPrefab;
     }
 }
-
-
-
