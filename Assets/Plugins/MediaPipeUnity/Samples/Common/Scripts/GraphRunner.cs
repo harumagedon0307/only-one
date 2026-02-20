@@ -33,7 +33,7 @@ namespace Mediapipe.Unity
     [SerializeField] private TextAsset _cpuConfig = null;
     [SerializeField] private TextAsset _gpuConfig = null;
     [SerializeField] private TextAsset _openGlEsConfig = null;
-    [SerializeField] private long _timeoutMicrosec = 0;
+    [SerializeField] private long _timeoutMicrosec = 300000;
 
     private static readonly GlobalInstanceTable<int, GraphRunner> _InstanceTable = new GlobalInstanceTable<int, GraphRunner>(5);
     private static readonly Dictionary<IntPtr, int> _NameTable = new Dictionary<IntPtr, int>();

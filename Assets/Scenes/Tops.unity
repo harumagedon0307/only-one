@@ -1209,7 +1209,7 @@ MonoBehaviour:
   slotImages: []
   slotButtons: []
   filePrefix: "\u524D\u670DTops_"
-  nextSceneName: DressUpScene
+  nextSceneName: DesignClot_ituki
   muscleGlbPath: "\u30E0\u30AD\u30E0\u30AD.glb"
   pythonBatPath: C:\path\to\your\start_fastapi.bat
   choicePanel: {fileID: 1719213828}

@@ -647,7 +647,7 @@ MonoBehaviour:
   _cpuConfig: {fileID: 4900000, guid: 5199c62ac0186dac28358b2ef639ef9b, type: 3}
   _gpuConfig: {fileID: 4900000, guid: 4711c9f7a612c310c844a312f6ec21c6, type: 3}
   _openGlEsConfig: {fileID: 4900000, guid: 8256a93f04d3d43118702a0ec0cc93a1, type: 3}
-  _timeoutMicrosec: 50000
+  _timeoutMicrosec: 300000
   modelComplexity: 1
   smoothLandmarks: 1
   enableSegmentation: 0
@@ -2339,6 +2339,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   pointListAnnotation: {fileID: 1982590784}
+  overrideMirrorMode: 1
+  mirrorMode: 1
 --- !u!1001 &1286974199
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -2807,6 +2809,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   pointListAnnotation: {fileID: 1982590784}
+  overrideMirrorMode: 1
+  mirrorMode: 1
 --- !u!1 &1602352520
 GameObject:
   m_ObjectHideFlags: 0
@@ -3828,7 +3832,15 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: fd7908f36f7199148bdf8276c3adbe21, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  classificationPath: /face/classification_face
+  timeoutSeconds: 20
+  maxUploadAttempts: 3
   interval: 5
+  convertImportedMaterialsToUrp: 0
+  forceDoubleSided: 1
+  forceUnlitForVisibility: 0
+  forceSolidColorForVisibility: 0
+  saveReceivedGlbToDisk: 0
 --- !u!4 &1935771086 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 4965192403804369240, guid: 3b696480602fe21de85315216956bd42, type: 3}

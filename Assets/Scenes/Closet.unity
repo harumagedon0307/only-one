@@ -2049,7 +2049,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   contentParent: {fileID: 1567465211}
   itemPrefab: {fileID: 8355346619938613081, guid: 3cd52d4dcdeae29418e4ee0434902568, type: 3}
-  nextSceneName: DressUpScene
+  nextSceneName: DesignClot_ituki
   maxItems: 6
   choicePanel: {fileID: 1243457649}
   messageText: {fileID: 1384504233}
@@ -3326,8 +3326,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   m_Material: {fileID: 0}
-  m_Color: {r: 1, g: 1, b: 1, a: 1}
-  m_RaycastTarget: 1
+  m_Color: {r: 1, g: 1, b: 1, a: 0}
+  m_RaycastTarget: 0
   m_RaycastPadding: {x: 0, y: 0, z: 0, w: 0}
   m_Maskable: 1
   m_OnCullStateChanged:

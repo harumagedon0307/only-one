@@ -4,32 +4,30 @@ using UnityEngine.UI;
 
 public class Editable : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, IDragHandler
 {
-    private float holdTime = 1.0f; // 長押し時間
-    private float pointerDownTimer = 0f;
-    private bool isPointerDown = false;
+    [SerializeField] private float holdTime = 1.0f;
+    [SerializeField] private float scaleSpeed = 0.005f;
+    [SerializeField] private float rotationSpeed = 1.0f;
+    [SerializeField] private float minScale = 0.5f;
+    [SerializeField] private float maxScale = 2.0f;
 
     public GameObject editMenuPrefab;
+
+    private float pointerDownTimer = 0f;
+    private bool isPointerDown = false;
+    private bool isEditing = false;
+
+    private float prevPinchDistance = 0f;
+    private float prevPinchAngle = 0f;
+
     private GameObject currentMenu;
+    private GameObject inputBlocker;
 
     private RectTransform rectTransform;
     private Canvas canvas;
 
-    // 他UIへイベントを通さないブロッカー
-    private GameObject inputBlocker;
-
-    private bool isEditing = false;
-
-    // ====== 追加：現在編集中の Editable（1つだけ） ======
     private static Editable currentEditingTarget = null;
 
-    // ---------- ピンチ操作用 ----------
-    private float prevPinchDistance = 0f;
-    [SerializeField] private float scaleSpeed = 0.005f;
-    [SerializeField] private float minScale = 0.5f;
-    [SerializeField] private float maxScale = 2.0f;
-    // ----------------------------------
-
-    void Awake()
+    private void Awake()
     {
         rectTransform = GetComponent<RectTransform>();
         canvas = GetComponentInParent<Canvas>();
@@ -40,7 +38,7 @@ public class Editable : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, I
         isEditing = value;
     }
 
-    void Update()
+    private void Update()
     {
         if (isPointerDown)
         {
@@ -51,16 +49,13 @@ public class Editable : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, I
             }
         }
 
-        // ピンチ拡大縮小（編集中の1つだけ）
-        HandlePinchZoom();
+        HandlePinchZoomAndRotate();
     }
 
     public void OnPointerDown(PointerEventData eventData)
     {
         isPointerDown = true;
         pointerDownTimer = 0f;
-
-        // 現在のイベントを消費
         eventData.Use();
     }
 
@@ -71,37 +66,47 @@ public class Editable : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, I
 
     public void OnDrag(PointerEventData eventData)
     {
-        if (isEditing && currentEditingTarget == this && Input.touchCount <= 1)
+        if (!isEditing || currentEditingTarget != this || Input.touchCount > 1)
         {
-            if (rectTransform == null) return;
-            float scale = (canvas != null && canvas.scaleFactor > 0f) ? canvas.scaleFactor : 1f;
-            rectTransform.anchoredPosition += eventData.delta / scale;
+            return;
         }
+
+        if (rectTransform == null)
+        {
+            return;
+        }
+
+        float scale = (canvas != null && canvas.scaleFactor > 0f) ? canvas.scaleFactor : 1f;
+        rectTransform.anchoredPosition += eventData.delta / scale;
     }
 
-    void LongPressSuccess()
+    private void LongPressSuccess()
     {
         isPointerDown = false;
         ActivateEditingTarget();
         OpenEditMenu();
     }
 
-    void ResetPress()
+    private void ResetPress()
     {
         isPointerDown = false;
         pointerDownTimer = 0f;
     }
 
-    void OpenEditMenu()
+    private void OpenEditMenu()
     {
-        if (currentMenu != null) return;
+        if (currentMenu != null)
+        {
+            return;
+        }
+
         if (editMenuPrefab == null)
         {
             Debug.LogWarning("Editable: editMenuPrefab is missing. Drag-only edit mode is enabled.");
             return;
         }
 
-        CreateInputBlocker();  // 後ろの UI を完全遮断
+        CreateInputBlocker();
 
         currentMenu = Instantiate(editMenuPrefab, transform.parent);
         currentMenu.transform.position = transform.position;
@@ -109,7 +114,7 @@ public class Editable : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, I
         EditMenu menu = currentMenu.GetComponent<EditMenu>();
         if (menu != null)
         {
-            menu.SetTarget(this.gameObject);
+            menu.SetTarget(gameObject);
         }
         else
         {
@@ -117,9 +122,8 @@ public class Editable : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, I
         }
     }
 
-    void ActivateEditingTarget()
+    private void ActivateEditingTarget()
     {
-        // 他が編集中なら解除（1つだけ編集）
         if (currentEditingTarget != null && currentEditingTarget != this)
         {
             currentEditingTarget.CloseEditMenuFromScript();
@@ -129,22 +133,31 @@ public class Editable : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, I
         currentEditingTarget = this;
     }
 
-    // ---------- ピンチ拡大縮小 ----------
-    void HandlePinchZoom()
+    private void HandlePinchZoomAndRotate()
     {
-        if (!isEditing) return;
-        if (currentEditingTarget != this) return;
+        if (!isEditing || currentEditingTarget != this)
+        {
+            return;
+        }
 
         if (Input.touchCount != 2)
         {
             prevPinchDistance = 0f;
+            prevPinchAngle = 0f;
+            return;
+        }
+
+        if (rectTransform == null)
+        {
             return;
         }
 
         Touch t1 = Input.GetTouch(0);
         Touch t2 = Input.GetTouch(1);
 
+        Vector2 touchDir = t2.position - t1.position;
         float currentDistance = Vector2.Distance(t1.position, t2.position);
+        float currentAngle = Mathf.Atan2(touchDir.y, touchDir.x) * Mathf.Rad2Deg;
 
         if (prevPinchDistance > 0f)
         {
@@ -152,22 +165,29 @@ public class Editable : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, I
             float scaleDelta = delta * scaleSpeed;
 
             Vector3 newScale = rectTransform.localScale + Vector3.one * scaleDelta;
-
             newScale.x = Mathf.Clamp(newScale.x, minScale, maxScale);
             newScale.y = Mathf.Clamp(newScale.y, minScale, maxScale);
             newScale.z = 1f;
-
             rectTransform.localScale = newScale;
         }
 
-        prevPinchDistance = currentDistance;
-    }
-    // ----------------------------------
+        if (prevPinchAngle != 0f)
+        {
+            float deltaAngle = Mathf.DeltaAngle(prevPinchAngle, currentAngle);
+            rectTransform.localEulerAngles += new Vector3(0f, 0f, deltaAngle * rotationSpeed);
+        }
 
-    // --------- UI ブロッカー生成 ---------
-    void CreateInputBlocker()
+        prevPinchDistance = currentDistance;
+        prevPinchAngle = currentAngle;
+    }
+
+    private void CreateInputBlocker()
     {
-        if (inputBlocker != null) return;
+        if (inputBlocker != null)
+        {
+            return;
+        }
+
         if (canvas == null)
         {
             Debug.LogWarning("Editable: Canvas was not found. Input blocker is skipped.");
@@ -176,8 +196,7 @@ public class Editable : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, I
 
         inputBlocker = new GameObject("InputBlocker");
         var img = inputBlocker.AddComponent<Image>();
-
-        img.color = new Color(0, 0, 0, 0);
+        img.color = new Color(0f, 0f, 0f, 0f);
         img.raycastTarget = true;
 
         inputBlocker.transform.SetParent(canvas.transform, false);
@@ -188,23 +207,30 @@ public class Editable : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, I
         rt.offsetMin = Vector2.zero;
         rt.offsetMax = Vector2.zero;
 
-        // EditMenu より手前に出さない
         inputBlocker.transform.SetSiblingIndex(transform.GetSiblingIndex());
     }
 
-    // メニューから呼ばれる閉じ処理
     public void CloseEditMenuFromScript()
     {
         if (currentMenu != null)
+        {
             Destroy(currentMenu);
+        }
 
         currentMenu = null;
         isEditing = false;
 
         if (currentEditingTarget == this)
+        {
             currentEditingTarget = null;
+        }
+
+        prevPinchDistance = 0f;
+        prevPinchAngle = 0f;
 
         if (inputBlocker != null)
+        {
             Destroy(inputBlocker);
+        }
     }
 }

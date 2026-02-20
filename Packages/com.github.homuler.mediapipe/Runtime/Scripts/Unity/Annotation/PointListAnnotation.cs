@@ -43,6 +43,8 @@ namespace Mediapipe.Unity
     public class PointListAnnotation : ListAnnotation<PointAnnotation>
     {
         private static PointListAnnotation s_runtimeTunerOwner;
+        private const float ScaleMultiplierMin = 0.30f;
+        private const float ScaleMultiplierMax = 8.00f;
 
         public List<Transform> rightupperArmObjs = new List<Transform>();
         public List<Transform> leftupperArmObjs = new List<Transform>();
@@ -69,6 +71,13 @@ namespace Mediapipe.Unity
         [SerializeField] [Range(0f, 1f)] private float _modelAnchorHeight01 = 0.84f;
         [SerializeField] [Range(0f, 1f)] private float _poseAnchorToShoulder01 = 0.0f;
         [SerializeField] private float _poseAnchorDownOffsetFactor = 1.10f;
+        [Header("Auto Follow")]
+        [SerializeField] private bool _autoFollowFromLandmarks = true;
+        [SerializeField] [Range(0f, 1.5f)] private float _faceFollowInfluence = 0.35f;
+        [SerializeField] private float _horizontalOffset01 = 0.0f;
+        [SerializeField] private bool _continuousAutoScale = true;
+        [SerializeField] private float _autoScaleLerpSpeed = 12.0f;
+        [SerializeField] private float _depthLerpSpeed = 10.0f;
         [Header("Runtime Tuner (wear_to_3d)")]
         [SerializeField] private bool _enableRuntimeTuner = true;
         [SerializeField] private bool _runtimeTunerOnlyInWearScene = true;
@@ -79,13 +88,19 @@ namespace Mediapipe.Unity
 
         [Header("Visibility Stability")]
         [SerializeField] private int _visibilityBufferFrames = 10; // Number of frames to wait before hiding model
+        [SerializeField] [Range(0f, 1f)] private float _bodyVisibilityThreshold = 0.35f;
+        [SerializeField] private bool _userClothVisible = true;
         private int _visibilityCounter = 0;
         private bool _loggedVisibilityFallback = false;
         private bool _loggedInsufficientLandmarks = false;
+        private bool _hasBodyTracking = false;
+
+        private static readonly int[] _requiredBodyLandmarkIndices = { 0, 11, 12 };
 
         private Vector3 _lastForward = Vector3.forward;
         private bool _isScaled = false;
         private Vector3 _modelBaseOffset;
+        private float _smoothedDepthMeters = -1.0f;
 
         private Vector3 MPToUnity(Vector3 mp)
         {
@@ -173,7 +188,11 @@ namespace Mediapipe.Unity
             _modelAnchorHeight01 = Mathf.Clamp01(_modelAnchorHeight01);
             _poseAnchorToShoulder01 = Mathf.Clamp01(_poseAnchorToShoulder01);
             _poseAnchorDownOffsetFactor = Mathf.Clamp(_poseAnchorDownOffsetFactor, -2.0f, 2.0f);
-            _scaleMultiplier = Mathf.Clamp(_scaleMultiplier, 0.30f, 4.00f);
+            _scaleMultiplier = Mathf.Clamp(_scaleMultiplier, ScaleMultiplierMin, ScaleMultiplierMax);
+            _faceFollowInfluence = Mathf.Clamp(_faceFollowInfluence, 0.0f, 1.5f);
+            _horizontalOffset01 = Mathf.Clamp(_horizontalOffset01, -0.5f, 0.5f);
+            _autoScaleLerpSpeed = Mathf.Clamp(_autoScaleLerpSpeed, 1.0f, 30.0f);
+            _depthLerpSpeed = Mathf.Clamp(_depthLerpSpeed, 1.0f, 30.0f);
         }
 
         private bool IsWearTo3DScene()
@@ -322,6 +341,8 @@ namespace Mediapipe.Unity
                 _poseAnchorToShoulder01 = 0.00f;
                 _poseAnchorDownOffsetFactor = 1.10f;
                 _scaleMultiplier = 1.70f;
+                _faceFollowInfluence = 0.35f;
+                _horizontalOffset01 = 0.0f;
                 _runtimeTunerUiScale = 1.60f;
                 MarkRuntimeTuningChanged();
             }
@@ -347,13 +368,15 @@ namespace Mediapipe.Unity
                     changed |= DrawRuntimeSlider("モデル基準高さ", ref _modelAnchorHeight01, 0.00f, 1.00f, 0.01f);
                     changed |= DrawRuntimeSlider("肩への寄せ量", ref _poseAnchorToShoulder01, 0.00f, 1.00f, 0.01f);
                     changed |= DrawRuntimeSlider("下方向オフセット", ref _poseAnchorDownOffsetFactor, -2.00f, 2.00f, 0.02f);
+                    changed |= DrawRuntimeSlider("横追従量", ref _faceFollowInfluence, 0.00f, 1.50f, 0.01f);
+                    changed |= DrawRuntimeSlider("横オフセット", ref _horizontalOffset01, -0.50f, 0.50f, 0.01f);
                     GUILayout.Space(4f);
                     GUILayout.Label("目安: 高さ/下方向オフセットを上げるとモデルが下に移動します。");
                 }
                 else if (_runtimeTunerTabIndex == 1)
                 {
                     float oldScaleMultiplier = _scaleMultiplier;
-                    changed |= DrawRuntimeSlider("モデル拡大率", ref _scaleMultiplier, 0.30f, 4.00f, 0.01f);
+                    changed |= DrawRuntimeSlider("モデル拡大率", ref _scaleMultiplier, ScaleMultiplierMin, ScaleMultiplierMax, 0.01f);
                     if (!Mathf.Approximately(oldScaleMultiplier, _scaleMultiplier))
                     {
                         ApplyScaleMultiplierImmediate(oldScaleMultiplier);
@@ -366,6 +389,8 @@ namespace Mediapipe.Unity
                     GUILayout.Label($"・モデル基準高さ: {_modelAnchorHeight01:F2}");
                     GUILayout.Label($"・肩への寄せ量: {_poseAnchorToShoulder01:F2}");
                     GUILayout.Label($"・下方向オフセット: {_poseAnchorDownOffsetFactor:F2}");
+                    GUILayout.Label($"・横追従量: {_faceFollowInfluence:F2}");
+                    GUILayout.Label($"・横オフセット: {_horizontalOffset01:F2}");
                     GUILayout.Label($"・モデル拡大率: {_scaleMultiplier:F2}");
                     GUILayout.Label($"・UIサイズ: {_runtimeTunerUiScale:F2}");
                     GUILayout.Space(8f);
@@ -420,6 +445,7 @@ namespace Mediapipe.Unity
             _isScaled = false;
             _loggedVisibilityFallback = false;
             _loggedInsufficientLandmarks = false;
+            _smoothedDepthMeters = -1.0f;
 
             BindBones(_targetObject);
             CenterModel(_targetObject);
@@ -428,7 +454,18 @@ namespace Mediapipe.Unity
             _targetObject.transform.rotation = Quaternion.Euler(0, _modelRotationOffset, 0);
             _modelBaseOffset = _targetObject.transform.position;
             
-            _visibilityCounter = _visibilityBufferFrames; // Initialize buffer
+            PlaceModelAtScreenCenter();
+            _visibilityCounter = 0;
+            _hasBodyTracking = false;
+            if (_userClothVisible)
+            {
+                SetActive(true);
+                ApplyCameraFallbackPose();
+            }
+            else
+            {
+                SetActive(false);
+            }
             Debug.Log(
                 "[PointListAnnotation] Anchor tuning: " +
                 $"modelAnchorHeight01={_modelAnchorHeight01:F2}, " +
@@ -440,36 +477,47 @@ namespace Mediapipe.Unity
 
         public void Draw(IList<NormalizedLandmark> targets, bool visualizeZ = true)
         {
-            bool isTracking = (targets != null && targets.Count > 0);
-            
-            if (isTracking)
+            if (!_userClothVisible)
+            {
+                SetActive(false);
+                return;
+            }
+
+            _hasBodyTracking = targets != null && targets.Count > 0;
+            SetActive(true);
+
+            if (_hasBodyTracking)
             {
                 _visibilityCounter = _visibilityBufferFrames;
-                SetActive(true);
-                
+
                 CallActionForAll(targets, (annotation, target) =>
                 {
                     annotation?.Draw(target, visualizeZ);
                 });
             }
-            else
-            {
-                if (_visibilityCounter > 0)
-                {
-                    _visibilityCounter--;
-                }
-                else
-                {
-                    SetActive(false);
-                }
-            }
         }
 
         private void LateUpdate()
         {
+            if (!_userClothVisible)
+            {
+                if (isActive)
+                {
+                    SetActive(false);
+                }
+                return;
+            }
+
             if (isActive && _targetObject != null)
             {
-                UpdateModelPose();
+                if (_hasBodyTracking)
+                {
+                    UpdateModelPose();
+                }
+                else
+                {
+                    ApplyCameraFallbackPose();
+                }
             }
         }
 
@@ -560,17 +608,46 @@ namespace Mediapipe.Unity
             return bounds.size;
         }
 
-        private void FitModelScale(GameObject model, float targetWidth, float targetHeight)
+        private void FitModelScale(GameObject model, float targetWidth, float targetHeight, bool smooth)
         {
+            if (!IsFinite(targetWidth) || !IsFinite(targetHeight))
+            {
+                return;
+            }
+
+            targetWidth = Mathf.Abs(targetWidth);
+            targetHeight = Mathf.Abs(targetHeight);
+            if (targetWidth < 1e-4f || targetHeight < 1e-4f)
+            {
+                return;
+            }
+
             Vector3 orig = GetModelOriginalSize(model);
+            if (orig.x < 1e-5f || orig.y < 1e-5f)
+            {
+                return;
+            }
 
             float scaleX = targetWidth / orig.x;
             float scaleY = targetHeight / orig.y;
             float scaleZ = (orig.z > 0.001f) ? scaleY * (orig.z / orig.y) : 1f;
 
-            float scale = (scaleX + scaleY + scaleZ) / 3f;
+            float ratio = (scaleX + scaleY + scaleZ) / 3f;
+            float currentScale = Mathf.Max(0.0001f, model.transform.localScale.x);
+            float targetScale = Mathf.Clamp(currentScale * ratio * _scaleMultiplier, 0.01f, 500f);
+            if (!IsFinite(targetScale))
+            {
+                return;
+            }
 
-            model.transform.localScale = Vector3.one * scale * _scaleMultiplier;
+            if (!smooth)
+            {
+                model.transform.localScale = Vector3.one * targetScale;
+                return;
+            }
+
+            float t = 1f - Mathf.Exp(-Mathf.Max(1f, _autoScaleLerpSpeed) * Time.deltaTime);
+            model.transform.localScale = Vector3.one * Mathf.Lerp(currentScale, targetScale, t);
         }
 
         public void SetColor(UnityEngine.Color color)
@@ -585,8 +662,39 @@ namespace Mediapipe.Unity
             ApplyRadius(_radius);
         }
 
+        public bool IsClothVisible()
+        {
+            return _userClothVisible;
+        }
+
+        public void SetClothVisible(bool visible)
+        {
+            _userClothVisible = visible;
+            if (!visible)
+            {
+                _hasBodyTracking = false;
+                SetActive(false);
+            }
+            else if (_targetObject != null)
+            {
+                SetActive(true);
+                ApplyCameraFallbackPose();
+            }
+        }
+
+        public void ToggleClothVisible()
+        {
+            SetClothVisible(!_userClothVisible);
+        }
+
         public void Draw(IList<Vector3> targets)
         {
+            if (!_userClothVisible)
+            {
+                SetActive(false);
+                return;
+            }
+
             // Similar buffering for Vector3 mode if needed
             if (targets != null && targets.Count > 0)
             {
@@ -597,14 +705,20 @@ namespace Mediapipe.Unity
                     annotation?.Draw(target);
                 });
             }
-            else if (_visibilityCounter <= 0)
+            else
             {
-                SetActive(false);
+                SetActive(true);
             }
         }
 
         public void Draw(IList<Landmark> targets, Vector3 scale, bool visualizeZ = true)
         {
+            if (!_userClothVisible)
+            {
+                SetActive(false);
+                return;
+            }
+
             if (targets != null && targets.Count > 0)
             {
                 _visibilityCounter = _visibilityBufferFrames;
@@ -616,9 +730,9 @@ namespace Mediapipe.Unity
 
                 UpdateModelPose(); // Only update pose when tracking is active
             }
-            else if (_visibilityCounter <= 0)
+            else
             {
-                SetActive(false);
+                SetActive(true);
             }
         }
 
@@ -634,6 +748,12 @@ namespace Mediapipe.Unity
 
         public void Draw(IList<mplt.RelativeKeypoint> targets, float threshold = 0.0f)
         {
+            if (!_userClothVisible)
+            {
+                SetActive(false);
+                return;
+            }
+
             if (targets != null && targets.Count > 0)
             {
                 _visibilityCounter = _visibilityBufferFrames;
@@ -643,14 +763,20 @@ namespace Mediapipe.Unity
                     annotation?.Draw(target, threshold);
                 });
             }
-            else if (_visibilityCounter <= 0)
+            else
             {
-                SetActive(false);
+                SetActive(true);
             }
         }
 
         public void Draw(IList<Landmark> worldLandmarks)
         {
+            if (!_userClothVisible)
+            {
+                SetActive(false);
+                return;
+            }
+
             if (worldLandmarks != null && worldLandmarks.Count > 0)
             {
                 _visibilityCounter = _visibilityBufferFrames;
@@ -661,9 +787,9 @@ namespace Mediapipe.Unity
                     children[i].transform.localPosition = new Vector3(lm.X, lm.Y, -lm.Z);
                 }
             }
-            else if (_visibilityCounter <= 0)
+            else
             {
-                SetActive(false);
+                SetActive(true);
             }
         }
 
@@ -672,51 +798,65 @@ namespace Mediapipe.Unity
             if (_targetObject == null || children.Count < 25)
                 return;
 
-            Vector3 rightShoulder = children[12].transform.position;
-            Vector3 leftShoulder = children[11].transform.position;
-            Vector3 rightHip = children[24].transform.position;
-            Vector3 leftHip = children[23].transform.position;
+            Camera cam = Camera.main;
+            if (cam == null)
+            {
+                ApplyCameraFallbackPose();
+                return;
+            }
 
-            Vector3 shoulderCenter = (leftShoulder + rightShoulder) * 0.5f;
-            Vector3 hipCenter = (leftHip + rightHip) * 0.5f;
-            Vector3 shoulderToHip = shoulderCenter - hipCenter;
-            float torsoHeight = shoulderToHip.magnitude;
-            Vector3 bodyUp = torsoHeight > 1e-5f ? shoulderToHip / torsoHeight : Vector3.up;
+            Vector3 rightShoulderLocal = children[12].transform.localPosition;
+            Vector3 leftShoulderLocal = children[11].transform.localPosition;
+            Vector3 rightHipLocal = children[24].transform.localPosition;
+            Vector3 leftHipLocal = children[23].transform.localPosition;
+
+            Vector3 shoulderCenterLocal = (leftShoulderLocal + rightShoulderLocal) * 0.5f;
+            Vector3 hipCenterLocal = (leftHipLocal + rightHipLocal) * 0.5f;
+            Vector3 shoulderToHipLocal = shoulderCenterLocal - hipCenterLocal;
+            float torsoHeightLocal = shoulderToHipLocal.magnitude;
+            Vector3 bodyUpLocal = torsoHeightLocal > 1e-5f ? shoulderToHipLocal / torsoHeightLocal : Vector3.up;
 
             float yaw = 0f;
             if (_useDynamicRotation)
             {
-                Vector3 bodyRight = (rightShoulder - leftShoulder).normalized;
-                Vector3 bodyForward = Vector3.Cross(bodyRight, bodyUp).normalized;
-                Camera cam = Camera.main;
-                if (cam != null)
-                {
-                    Vector3 camUp = cam.transform.up;
-                    Vector3 camForward = cam.transform.forward;
-                    Vector3 projectedForward = Vector3.ProjectOnPlane(bodyForward, camUp).normalized;
-                    yaw = Vector3.SignedAngle(camForward, projectedForward, camUp);
-                }
+                Vector3 bodyRight = (rightShoulderLocal - leftShoulderLocal).normalized;
+                Vector3 bodyForward = Vector3.Cross(bodyRight, bodyUpLocal).normalized;
+                Vector3 camUp = cam.transform.up;
+                Vector3 camForward = cam.transform.forward;
+                Vector3 projectedForward = Vector3.ProjectOnPlane(bodyForward, camUp).normalized;
+                yaw = Vector3.SignedAngle(camForward, projectedForward, camUp);
             }
 
             Quaternion targetRot = Quaternion.Euler(0f, yaw + _modelRotationOffset, 0f);
             _targetObject.transform.rotation = Quaternion.Slerp(_targetObject.transform.rotation, targetRot, Time.deltaTime * 10f);
 
-            if (!_isScaled)
+            Vector2 anchorViewport = new Vector2(0.5f, 0.5f);
+            if (_autoFollowFromLandmarks && children.Count > 0)
             {
-                if (TryGetBodySize(out float shoulderWidth, out float bodyHeight))
+                Vector3 noseLocal = children[0].transform.localPosition;
+                if (TryLocalPointToViewport(noseLocal, out Vector2 noseViewport))
                 {
-                    FitModelScale(_targetObject, shoulderWidth, bodyHeight);
-                    _isScaled = true;
-                    _modelBaseOffset = hipCenter;
+                    Vector2 faceOffset = noseViewport - new Vector2(0.5f, 0.5f);
+                    anchorViewport += faceOffset * _faceFollowInfluence;
                 }
             }
+            anchorViewport.x += _horizontalOffset01;
+            anchorViewport.x = Mathf.Clamp01(anchorViewport.x);
+            anchorViewport.y = Mathf.Clamp01(anchorViewport.y);
 
-            Vector3 poseAnchor = Vector3.Lerp(hipCenter, shoulderCenter, Mathf.Clamp01(_poseAnchorToShoulder01));
-            if (torsoHeight > 1e-5f)
+            float targetDepth = ComputeDepthFromTorsoHeight(torsoHeightLocal, cam);
+            float depth = SmoothDepthMeters(targetDepth);
+            depth = Mathf.Max(cam.nearClipPlane + 0.3f, depth);
+
+            if (TryGetBodySizeAtDepth(cam, leftShoulderLocal, rightShoulderLocal, leftHipLocal, rightHipLocal, depth, out float shoulderWidthWorld, out float bodyHeightWorld))
             {
-                poseAnchor -= bodyUp * (torsoHeight * _poseAnchorDownOffsetFactor);
+                bool smoothScale = _continuousAutoScale || _isScaled;
+                FitModelScale(_targetObject, shoulderWidthWorld, bodyHeightWorld, smoothScale);
+                _isScaled = true;
+                _modelBaseOffset = hipCenterLocal;
             }
 
+            Vector3 poseAnchor = cam.ViewportToWorldPoint(new Vector3(anchorViewport.x, anchorViewport.y, depth));
             if (_forceVisibleInFrontOfCamera)
             {
                 poseAnchor = EnsurePointInFrontOfCamera(poseAnchor);
@@ -733,9 +873,7 @@ namespace Mediapipe.Unity
             if (cam == null || _targetObject == null)
                 return;
 
-            float depth = Mathf.Max(_fallbackDepthMeters, cam.nearClipPlane + 0.5f);
-            Vector3 targetAnchor = cam.ViewportToWorldPoint(new Vector3(0.5f, 0.55f, depth));
-            AlignModelAnchorToWorldPoint(_targetObject, targetAnchor, _modelAnchorHeight01);
+            PlaceModelAtScreenCenter();
 
             Vector3 flatForward = Vector3.ProjectOnPlane(cam.transform.forward, Vector3.up);
             if (flatForward.sqrMagnitude > 1e-6f)
@@ -752,6 +890,150 @@ namespace Mediapipe.Unity
                 _loggedInsufficientLandmarks = true;
                 Debug.LogWarning("[PointListAnnotation] Insufficient pose landmarks for full body alignment. Using camera-front fallback.");
             }
+        }
+
+        private void PlaceModelAtScreenCenter()
+        {
+            Camera cam = Camera.main;
+            if (cam == null || _targetObject == null)
+                return;
+
+            float depth = Mathf.Max(_fallbackDepthMeters, cam.nearClipPlane + 0.5f);
+            Vector3 targetAnchor = cam.ViewportToWorldPoint(new Vector3(0.5f, 0.5f, depth));
+            AlignModelAnchorToWorldPoint(_targetObject, targetAnchor, _modelAnchorHeight01);
+            _smoothedDepthMeters = depth;
+        }
+
+        private bool HasReliableBodyTracking(IList<NormalizedLandmark> targets)
+        {
+            if (targets == null || targets.Count < 13)
+            {
+                return false;
+            }
+
+            foreach (int idx in _requiredBodyLandmarkIndices)
+            {
+                if (idx < 0 || idx >= targets.Count)
+                {
+                    return false;
+                }
+
+                var lm = targets[idx];
+                if (lm == null)
+                {
+                    return false;
+                }
+
+                if (!IsFinite(lm.X) || !IsFinite(lm.Y) || !IsFinite(lm.Z))
+                {
+                    return false;
+                }
+
+                // Some pipelines do not populate Visibility/Presence (remain 0).
+                // In that case, fall back to coordinate validity only.
+                float confidence = Mathf.Max(lm.Visibility, lm.Presence);
+                if (confidence > 1e-5f && confidence < _bodyVisibilityThreshold)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private bool TryLocalPointToViewport(Vector3 localPoint, out Vector2 viewportPoint)
+        {
+            UnityEngine.Rect rect = GetScreenRect();
+            if (rect.width <= 1e-5f || rect.height <= 1e-5f)
+            {
+                viewportPoint = new Vector2(0.5f, 0.5f);
+                return false;
+            }
+
+            float x = Mathf.InverseLerp(rect.xMin, rect.xMax, localPoint.x);
+            float y = Mathf.InverseLerp(rect.yMin, rect.yMax, localPoint.y);
+
+            if (!IsFinite(x) || !IsFinite(y))
+            {
+                viewportPoint = new Vector2(0.5f, 0.5f);
+                return false;
+            }
+
+            viewportPoint = new Vector2(Mathf.Clamp01(x), Mathf.Clamp01(y));
+            return true;
+        }
+
+        private float ComputeDepthFromTorsoHeight(float torsoHeightLocal, Camera cam)
+        {
+            UnityEngine.Rect rect = GetScreenRect();
+            float normalizedTorso = 0f;
+            if (rect.height > 1e-4f)
+            {
+                normalizedTorso = Mathf.Abs(torsoHeightLocal) / rect.height;
+            }
+            normalizedTorso = Mathf.Clamp(normalizedTorso, 0.01f, 0.95f);
+
+            float nearDepth = Mathf.Max(cam.nearClipPlane + 0.8f, 1.0f);
+            float farDepth = Mathf.Max(_fallbackDepthMeters, nearDepth + 0.5f);
+            float t = Mathf.InverseLerp(0.10f, 0.45f, normalizedTorso);
+            float depth = Mathf.Lerp(farDepth, nearDepth, t);
+            if (!IsFinite(depth))
+            {
+                depth = farDepth;
+            }
+            return depth;
+        }
+
+        private float SmoothDepthMeters(float targetDepth)
+        {
+            if (!IsFinite(targetDepth) || targetDepth <= 0f)
+            {
+                targetDepth = Mathf.Max(_fallbackDepthMeters, 1.0f);
+            }
+
+            if (!IsFinite(_smoothedDepthMeters) || _smoothedDepthMeters <= 0f)
+            {
+                _smoothedDepthMeters = targetDepth;
+                return _smoothedDepthMeters;
+            }
+
+            float t = 1f - Mathf.Exp(-Mathf.Max(1f, _depthLerpSpeed) * Time.deltaTime);
+            _smoothedDepthMeters = Mathf.Lerp(_smoothedDepthMeters, targetDepth, t);
+            return _smoothedDepthMeters;
+        }
+
+        private bool TryGetBodySizeAtDepth(
+            Camera cam,
+            Vector3 leftShoulderLocal,
+            Vector3 rightShoulderLocal,
+            Vector3 leftHipLocal,
+            Vector3 rightHipLocal,
+            float depth,
+            out float shoulderWidth,
+            out float bodyHeight)
+        {
+            shoulderWidth = 0f;
+            bodyHeight = 0f;
+
+            if (!TryLocalPointToViewport(leftShoulderLocal, out Vector2 lsVp) ||
+                !TryLocalPointToViewport(rightShoulderLocal, out Vector2 rsVp) ||
+                !TryLocalPointToViewport(leftHipLocal, out Vector2 lhVp) ||
+                !TryLocalPointToViewport(rightHipLocal, out Vector2 rhVp))
+            {
+                return false;
+            }
+
+            Vector3 leftShoulderWorld = cam.ViewportToWorldPoint(new Vector3(lsVp.x, lsVp.y, depth));
+            Vector3 rightShoulderWorld = cam.ViewportToWorldPoint(new Vector3(rsVp.x, rsVp.y, depth));
+            Vector3 leftHipWorld = cam.ViewportToWorldPoint(new Vector3(lhVp.x, lhVp.y, depth));
+            Vector3 rightHipWorld = cam.ViewportToWorldPoint(new Vector3(rhVp.x, rhVp.y, depth));
+
+            shoulderWidth = Vector3.Distance(leftShoulderWorld, rightShoulderWorld);
+            Vector3 topCenter = (leftShoulderWorld + rightShoulderWorld) * 0.5f;
+            Vector3 bottomCenter = (leftHipWorld + rightHipWorld) * 0.5f;
+            bodyHeight = Vector3.Distance(topCenter, bottomCenter);
+
+            return IsFinite(shoulderWidth) && IsFinite(bodyHeight) && shoulderWidth > 1e-4f && bodyHeight > 1e-4f;
         }
 
         private void NormalizeModelOnSet(GameObject model)
